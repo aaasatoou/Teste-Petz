@@ -9,7 +9,7 @@
 # MAGIC - Trabalhe com R ou Python na ferramenta Databricks;
 # MAGIC - O código deverá ser versionado no Github ou Bitbucket.
 # MAGIC 
-# MAGIC Devido a limitações de tempo, será priorizado o desenvolvimento de um modelo funcional. Caso o modelo de predição seja desenvolvido com certa folga, poderá vir a ser atualizado. Haverá uma seção ao fim deste notebook listando as possíveis melhoras a serem implementadas.
+# MAGIC Devido a limitações de tempo, será priorizado o desenvolvimento de um modelo funcional. Caso o modelo de predição seja desenvolvido com certa folga, poderá vir a ser atualizado.
 # MAGIC 
 # MAGIC O teste será dividido em: Analise Exploratória, Tratamento dos Dados (caso necessário), Desenvolvimento de um modelo baseline (considerando o problema proposto), Teste do Modelo e Predições.
 
@@ -23,9 +23,8 @@ import matplotlib.pyplot as plt
 
 from prophet import Prophet
 from statsmodels.tsa.seasonal import seasonal_decompose
-import multiprocessing
-
-multiprocessing.set_start_method("fork")
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import mean_absolute_error
 
 # COMMAND ----------
 
@@ -34,27 +33,27 @@ multiprocessing.set_start_method("fork")
 
 # COMMAND ----------
 
-df_vendas = pd.read_csv('/dbfs/FileStore/PetzTest/Vendas.csv', sep=';')
+df_vendas = pd.read_csv('/dbfs/FileStore/Vendas.csv', sep=';')
 df_vendas.head()
 
 # COMMAND ----------
 
-df_canais = pd.read_csv('/dbfs/FileStore/PetzTest/Canais.csv', sep=';')
+df_canais = pd.read_csv('/dbfs/FileStore/Canais.csv', sep=';')
 df_canais.head()
 
 # COMMAND ----------
 
-df_produtos = pd.read_csv('/dbfs/FileStore/PetzTest/Produtos.csv', sep=';')
+df_produtos = pd.read_csv('/dbfs/FileStore/Produtos.csv', sep=';')
 df_produtos.head()
 
 # COMMAND ----------
 
-df_unidades = pd.read_csv('/dbfs/FileStore/PetzTest/Unidades_Negócios.csv', sep=';', encoding='latin-1')
+df_unidades = pd.read_csv('/dbfs/FileStore/Unidades_Negócios.csv', sep=';', encoding='latin-1')
 df_unidades.head()
 
 # COMMAND ----------
 
-df_lojas = pd.read_csv('/dbfs/FileStore/PetzTest/Lojas.csv', sep=';', encoding='latin-1')
+df_lojas = pd.read_csv('/dbfs/FileStore/Lojas.csv', sep=';', encoding='latin-1')
 df_lojas.head()
 
 # COMMAND ----------
@@ -105,10 +104,6 @@ df_vendas.isnull().values.any()
 
 # COMMAND ----------
 
-
-
-# COMMAND ----------
-
 # Ajuste nos tipos das variáveis
 
 df_vendas['id_data'] = pd.to_datetime(df_vendas['id_data'], format = '%Y-%m-%d')
@@ -117,6 +112,10 @@ df_vendas['qtde_venda'] = df_vendas['qtde_venda'].apply(lambda x: x.replace(',',
 df_vendas['valor_venda'] = df_vendas['valor_venda'].apply(lambda x: x.replace(',', '.')).astype('float64')
 df_vendas['valor_imposto'] = df_vendas['valor_imposto'].apply(lambda x: x.replace(',', '.')).astype('float64')
 df_vendas['valor_custo'] = df_vendas['valor_custo'].apply(lambda x: x.replace(',', '.')).astype('float64')
+
+# COMMAND ----------
+
+df_vendas[['qtde_venda', 'valor_venda', 'valor_imposto', 'valor_custo']].describe()
 
 # COMMAND ----------
 
@@ -138,7 +137,7 @@ df_vendas.shape
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Ainda possuímos 4 milhões de linhas, é correto afirmar que os modelos não serão severamente afetados.
+# MAGIC Ainda possuímos 3,8 milhões de linhas, é correto afirmar que os modelos não serão severamente afetados.
 
 # COMMAND ----------
 
@@ -225,6 +224,11 @@ print(df_vendas['id_data'].max())
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ##Baseline
+
+# COMMAND ----------
+
 lista_produtos = df_vendas['id_produto'].unique()
 df_timeseries = df_vendas.groupby(['id_produto','id_data']).sum().copy()
 df_timeseries
@@ -266,25 +270,86 @@ for key, value in result[4].items():
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Apesar dos gráficos indicarem certa sazonalidade na série consolidada dos produtos, vemos no teste de Dickey-Fuller que a série pode sim ser considerada estacionária. Nesta situação, podemos utilizar o modelo prophet, desenvolvido pela Meta. O prophet funciona bem com dados que apresentam uma grande sazonalidade.
+# MAGIC Apesar dos gráficos indicarem certa sazonalidade na série consolidada dos produtos, vemos no teste de Dickey-Fuller que a série pode sim ser considerada estacionária. Nesta situação, podemos utilizar o modelo prophet, desenvolvido pela Meta. O prophet funciona bem com dados estacionários e que mostram uma certa aleatoriedade (lembrando sazonalidade).
 
 # COMMAND ----------
 
-def treino_forecast_save(produto, periodo_pred):
-    prophet_basic = Prophet(yearly_seasonality = 20, mcmc_samples = 300)
-    prophet_basic.add_seasonality(name='weekly', period=7, fourier_order=5, prior_scale=0.5)
+prophet_basic = Prophet(yearly_seasonality = 20)
+prophet_basic.add_seasonality(name='weekly', period=7, fourier_order=5, prior_scale=0.5)
 
-    prophet_basic.fit(produto)
+prophet_basic.fit(df_vendas.groupby('id_data').sum()['qtde_venda'].resample('D').last().reset_index().rename(columns = {'id_data': 'ds', 'qtde_venda': 'y'}))
 
-    future = prophet_basic.make_future_dataframe(periods=periodo_pred)
-    forecast = prophet_basic.predict(future)
-    
-    return forecast
-
-# COMMAND ----------
-
-forecast = treino_forecast_save(df_vendas.groupby('id_data').sum()['qtde_venda'].resample('D').last().reset_index().rename(columns = {'id_data': 'ds', 'qtde_venda': 'y'}), 30)
+future = prophet_basic.make_future_dataframe(periods=30)
+forecast = prophet_basic.predict(future)
 
 # COMMAND ----------
 
 pd.concat([df_vendas.groupby('id_data').sum()['qtde_venda'].resample('D').last().reset_index().rename(columns = {'id_data': 'ds', 'qtde_venda': 'y'}).set_index('ds'), forecast[['ds', 'yhat']].rename(columns = {'yhat':'y'}).set_index('ds')]).plot(figsize = (30,5))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##Modelo Final
+# MAGIC Seguindo o baseline proposto para a série consolidada de dados, o modelo prophet será treinado e aplicada para cada um dos produtos.
+
+# COMMAND ----------
+
+# Os 30 ultimos dias de dados serão utilizados como teste
+# Normamente utilizariamos TimeSeriesSplit para utilizar um cross validator, porém, são muitos produtos e a inconsistencia dos dados pode ser problematica
+df_teste = pd.DataFrame()
+predicoes = pd.DataFrame()
+for i in lista_produtos:
+    timeseries = df_timeseries.loc[(i,),:]['qtde_venda'].resample('D').last().reset_index().rename(columns = {'id_data':'ds', 'qtde_venda':'y'})
+
+    teste = timeseries[-30:].copy()
+    treino = timeseries[0:-30].copy()
+
+    transformer = RobustScaler() # Escolha do RobustScaler parte da ideia que são dados de venda, com vários outliers naturais pelo caminho
+    transformer.fit(treino['y'].to_numpy().reshape(-1, 1))
+    treino['y'] = transformer.transform(treino['y'].to_numpy().reshape(-1, 1))
+    teste['y'] = transformer.transform(teste['y'].to_numpy().reshape(-1, 1))
+
+
+    prophet_basic = Prophet(yearly_seasonality = 20)
+    prophet_basic.add_seasonality(name='weekly', period=7, fourier_order=5, prior_scale=0.5)
+
+    prophet_basic.fit(treino)
+    
+    
+    for periodo in [30, 60, 90]:
+        future = prophet_basic.make_future_dataframe(periods=periodo)
+        forecast = prophet_basic.predict(future)
+        forecast['yhat'] = transformer.inverse_transform(forecast['yhat'].to_numpy().reshape(-1, 1))
+        forecast['periodo'] = periodo
+        forecast['produto'] = i
+        
+        predicoes = pd.concat([predicoes, forecast[['ds','yhat', 'periodo', 'produto']]])
+        
+        
+    forecast_teste = prophet_basic.predict(teste[['ds']])   
+    forecast_teste['yhat'] = transformer.inverse_transform(forecast_teste['yhat'].to_numpy().reshape(-1, 1))
+    forecast_teste['produto'] = i
+    teste['y'] = transformer.inverse_transform(teste['y'].to_numpy().reshape(-1, 1))
+    
+    df_teste = pd.concat([df_teste, pd.concat([forecast_teste[['ds', 'yhat', 'produto']], teste[['y']].reset_index(drop = True)], axis = 1)])
+    
+
+# COMMAND ----------
+
+predicoes = predicoes.set_index(['produto','periodo','ds'])
+predicoes
+
+# COMMAND ----------
+
+df_teste = df_teste.set_index(['produto','ds'])
+df_teste
+
+# COMMAND ----------
+
+metrics_dict = {}
+for i in lista_produtos:
+    y_true = df_teste.loc[(i,),:].dropna()['y']
+    y_pred = df_teste.loc[(i,),:].dropna()['yhat']
+    metrics_dict[f'{i}'] = mean_absolute_error(y_true, y_pred)
+
+metrics_dict
